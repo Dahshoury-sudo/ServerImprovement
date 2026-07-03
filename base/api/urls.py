@@ -38,12 +38,6 @@ urlpatterns = [
     path('reviews/add/', views.add_review, name='add_review'),
     path('products/<str:product_id>/reviews/', views.get_product_reviews, name='product_reviews'),
 
-    ################### Payment ###################### (Stripe)
-    path('payment/create-checkout-session/',views.create_checkout_session),
-    path('payment/webhook/stripe/',views.stripe_webhook),
-    ################################################## (PayPal)
-    path('paypal/create-order/', views.create_paypal_order, name='paypal-create'),
-    path('paypal/capture-order/', views.capture_paypal_order, name='paypal-capture'),
     ################################################## (Paymob)
     path('payment/paymob/create-checkout/', views.paymob_checkout, name='paymob-create-checkout'),
     path('payment/webhook/paymob/', views.paymob_webhook, name='paymob-webhook'),
@@ -52,6 +46,7 @@ urlpatterns = [
     ## Dashboard
     path('dashboard/orders/recent/',views.get_latest_orders),
     path('dashboard/stats/',views.get_dashboard_stats),
+    path('dashboard/analytics/', views.AdminDashboardAnalyticsView.as_view(), name='admin-dashboard-analytics'),
     path('dashboard/reviews/',views.get_all_reviews),
     path('dashboard/order/<str:pk>/',views.order_detail_action),
     path('dashboard/make-admin/',views.promote_user_to_admin),

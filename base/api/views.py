@@ -1,10 +1,14 @@
+# pyrefly: ignore [missing-import]
 from django.utils.translation import gettext as _
 from rest_framework.decorators import api_view,permission_classes, parser_classes
 import json
 from base.utils import send_telegram_notification
+# pyrefly: ignore [missing-import]
 from django.http import HttpResponse
 import stripe
+# pyrefly: ignore [missing-import]
 from rest_framework.response import Response
+# pyrefly: ignore [missing-import]
 from django.db import transaction
 import requests
 import time
@@ -752,307 +756,6 @@ def clear_cart_for_order(order):
     elif order.device_id:
         models.Cart.objects.filter(device_id=order.device_id, customer__isnull=True).delete()
 
-############## Payment Integration (Paypal) #############
-
-def get_paypal_access_token():
-    """Helper to get a fresh access token from PayPal."""
-    url = f"{settings.PAYPAL_API_URL}/v1/oauth2/token"
-    resp = requests.post(
-        url,
-        auth=(settings.PAYPAL_CLIENT_ID, settings.PAYPAL_SECRET),
-        data={'grant_type': 'client_credentials'}
-    )
-    resp.raise_for_status()
-    return resp.json()['access_token']
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def create_paypal_order(request):
-    access_token = get_paypal_access_token()
-    
-    # 1. GET THE ORDER ID FROM YOUR FRONTEND
-    # You must send this from your React/Vue/HTML page
-    django_order_id = request.data.get('order_id')
-    
-    # Validation: Make sure we actually got an ID
-    if not django_order_id:
-        return JsonResponse({'error': _('Order ID is required')}, status=400)
-
-    # Fetch the order to get the real price (Security)
-    try:
-        order = get_order_for_payment(request, django_order_id)
-    except models.Order.DoesNotExist:
-        return JsonResponse({'error': _('Order not found')}, status=404)
-
-    if order.status != 'awaiting_payment':
-        return JsonResponse(
-            {'error': _('This order cannot be paid online or is already processed.')}, 
-            status=400
-        )
-
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {access_token}',
-    }
-    
-    data = {
-        "intent": "CAPTURE",
-        "purchase_units": [{
-            "amount": {
-                "currency_code": "USD",
-                "value": str(order.total_price) # Use the real database price!
-            },
-            # --- THE MISSING PIECE ---
-            # We attach the ID here so we can read it back later
-            "custom_id": str(order.id) 
-            # -------------------------
-        }],
-        "application_context": {
-            "return_url": settings.DOMAIN_URL,
-            "cancel_url": settings.DOMAIN_URL+"payment-cancel/"
-        }
-    }
-
-    resp = requests.post(
-        f"{settings.PAYPAL_API_URL}/v2/checkout/orders", 
-        headers=headers, 
-        json=data
-    )
-    
-    return JsonResponse(resp.json())
-
-
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def capture_paypal_order(request):
-    # 1. Get the PayPal Order ID from the frontend
-    paypal_order_id = request.data.get('orderID') 
-    
-    # 2. Get Access Token (Helper function we wrote earlier)
-    access_token = get_paypal_access_token()
-
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {access_token}',
-    }
-
-    # 3. Ask PayPal to capture the payment
-    url = f"{settings.PAYPAL_API_URL}/v2/checkout/orders/{paypal_order_id}/capture"
-    resp = requests.post(url, headers=headers)
-    
-    result = resp.json()
-    
-    print("PAYPAL ERROR DETAILS:", result)
-
-    # 4. Check if PayPal says "COMPLETED"
-    if result.get('status') == 'COMPLETED':
-        
-        try:
-            # --- CRITICAL FIX: GET YOUR DJANGO ID ---
-            # We look for the 'custom_id' we attached during the Create step.
-            # It's usually in purchase_units[0].payments.captures[0].custom_id
-            
-            # Use safe navigation in case structure varies slightly
-            purchase_unit = result['purchase_units'][0]
-            
-            if 'custom_id' in purchase_unit:
-                django_order_id = purchase_unit['custom_id']
-            elif 'payments' in purchase_unit:
-                django_order_id = purchase_unit['payments']['captures'][0]['custom_id']
-            else:
-                # Fallback: If for some reason custom_id is missing, 
-                # we hope the frontend sent it in the request body as a backup.
-                django_order_id = request.data.get('django_order_id')
-
-            if not django_order_id:
-                return JsonResponse({'error': _('Could not link PayPal transaction to Order')}, status=400)
-
-            # --- DATABASE UPDATES (ATOMIC) ---
-            with transaction.atomic():
-                # 1. Lock the order row to prevent race conditions
-                order = models.Order.objects.select_for_update().prefetch_related('items__variant').get(id=django_order_id)
-
-                # 2. Prevent double-payment processing
-                if order.status == 'paid':
-                     return JsonResponse({'message': _('Order already processed')}, status=200)
-
-                # 3. Mark as paid
-                order.status = 'paid'
-                order.save()
-
-                # 4. Decrease Stock Safely using F()
-                for item in order.items.all():
-                    # "Subtract quantity from current DB value"
-                    variant = item.variant
-                    if variant.stock < item.quantity:
-                        raise ValueError(_("Insufficient stock for {variant}").format(variant=variant))
-                    item.variant.stock = F('stock') - item.quantity
-                    item.variant.save()
-
-                # 5. Clear Cart
-                # We use the helper which handles both authenticated and guest carts
-                clear_cart_for_order(order)
-                
-                # 6. (Optional) Save the Transaction ID for records
-                models.Payment.objects.create(
-                    customer=order.customer,
-                    order=order,
-                    amount=order.total_price,
-                    method='paypal',
-                    transaction_id=paypal_order_id
-                )
-
-            return JsonResponse({'message': _('Order completed!'), 'data': result})
-
-        except models.Order.DoesNotExist:
-            return JsonResponse({'error': _('Order ID not found in database')}, status=404)
-        except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
-
-    # If status is not COMPLETED
-    return JsonResponse({'error': _('Payment not completed'), 'details': result}, status=400)
-
-
-
-
-############## Payment Integration (Stripe) #############
-
-stripe.api_key = settings.STRIPE_SECRET_KEY
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def create_checkout_session(request):
-    """
-    Creates the Stripe session and returns the URL to redirect the user to.
-    """
-    order_id = request.data.get('order_id') # Changed from 'django_order_id' to match frontend usually
-    
-    if not order_id:
-        return Response({"error": _("order_id is required")}, status=status.HTTP_400_BAD_REQUEST)
-    
-    try:
-        order = get_order_for_payment(request, order_id)
-    except models.Order.DoesNotExist:
-        return Response({"error": _("Order not found")}, status=status.HTTP_404_NOT_FOUND)
-    
-    # Check if eligible for online payment
-    if order.status != 'awaiting_payment':
-         return Response(
-             {"error": _("This order cannot be paid online or is already processed.")}, 
-             status=status.HTTP_400_BAD_REQUEST
-         )
-
-    # Build line items
-    line_items = []
-    for item in order.items.all():
-        # Determine the correct name (handle variants if they exist)
-        product_name = item.variant.product.name if item.variant else "Unknown Product"
-        
-        line_items.append({
-            'price_data': {
-                'currency': 'usd',
-                'product_data': {
-                    'name': product_name,
-                    # Optional: Add image if your model has it
-                    # 'images': [item.variant.image.url], 
-                },
-                # Price must be in Cents (e.g., $10.00 -> 1000)
-                # We use item.variant.price if available, or item.price
-                'unit_amount': int(item.variant.price * 100), 
-            },
-            'quantity': item.quantity,
-        })
-
-    try:
-        checkout_session = stripe.checkout.Session.create(
-            payment_method_types=['card'],
-            line_items=line_items,
-            mode='payment',
-            client_reference_id=str(order.id), # Key link for the webhook
-            success_url=request.data.get('success_url', settings.DOMAIN_URL + 'payment-success/'),
-            cancel_url=request.data.get('cancel_url', settings.DOMAIN_URL + 'payment-cancel/'),
-            metadata={
-                'order_id': str(order.id),
-            }
-        )
-
-        return Response({'url': checkout_session.url})
-
-    except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-# --- WEBHOOK LISTENER ---
-
-@csrf_exempt
-def stripe_webhook(request):
-    """
-    Standard Django view (not DRF) to handle raw request body safely.
-    """
-    payload = request.body
-    sig_header = request.META.get('HTTP_STRIPE_SIGNATURE')
-    event = None
-
-    try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, settings.STRIPE_WEBHOOK_SECRET
-        )
-    except ValueError as e:
-        return Response({"error":e},status=400) # Invalid payload
-    except stripe.error.SignatureVerificationError as e:
-        return Response({"error":e},status=400) # Invalid signature
-
-    # Handle the "Payment Successful" event
-    if event['type'] == 'checkout.session.completed':
-        session = event['data']['object']
-        
-        # 1. Get the Order ID
-        order_id = session.get('client_reference_id') or session.get('metadata', {}).get('order_id')
-        
-        if order_id:
-            try:
-                # 2. Start Atomic Transaction (Safety Lock)
-                with transaction.atomic():
-                    order = models.Order.objects.select_for_update().get(id=order_id)
-                    
-                    # Prevent double processing
-                    if order.status == 'paid':
-                        return Response({"error":_("Order already processed")},status=200)
-
-                    # 3. Mark as Paid
-                    order.status = 'paid'
-                    order.save()
-                    
-                    # 4. Decrease Stock (Using F objects for race-condition safety)
-                    for item in order.items.select_related('variant'):
-                        item.variant.stock = F('stock') - item.quantity
-                        item.variant.save()
-
-                    # 5. Clear the Cart (handles both authenticated and guest)
-                    clear_cart_for_order(order)
-
-                    # 6. Create Payment Record
-                    models.Payment.objects.create(
-                        customer=order.customer,
-                        order=order,
-                        amount=Decimal(session['amount_total']) / 100, # Convert cents back to dollars
-                        method='stripe',
-                        transaction_id=session['payment_intent']
-                    )
-                    
-                    print(f"✅ Order {order_id} fully processed via Stripe.")
-
-            except models.Order.DoesNotExist:
-                print(f"❌ Order {order_id} not found during webhook.")
-            except Exception as e:
-                print(f"❌ Webhook Error: {str(e)}")
-                return Response({"error":e},status=500)
-
-    return HttpResponse(status=200)
-
-
-
 
 ############## Payment Integration (Paymob) #############
 import hmac
@@ -1420,9 +1123,21 @@ def get_all_orders_num(request):
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def get_dashboard_stats(request):
+    now = timezone.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = today_start - timedelta(days=now.weekday())
+    month_start = today_start.replace(day=1)
+
     # 1. Total Sales
     total_sales = models.Payment.objects.aggregate(total=Sum('amount'))['total'] or 0
     
+    revenue_stats = {
+        "today": models.Payment.objects.filter(created_at__gte=today_start).aggregate(total=Sum('amount'))['total'] or 0,
+        "this_week": models.Payment.objects.filter(created_at__gte=week_start).aggregate(total=Sum('amount'))['total'] or 0,
+        "this_month": models.Payment.objects.filter(created_at__gte=month_start).aggregate(total=Sum('amount'))['total'] or 0,
+        "all_time": total_sales,
+    }
+
     # 2. Total Products & Stock (One query)
     product_stats = models.Product.objects.aggregate(
         count=Count('id'),
@@ -1444,11 +1159,24 @@ def get_dashboard_stats(request):
         # ... add others
     )
 
+    # 5. Out of stock variants
+    out_of_stock_count = models.ProductVariant.objects.filter(stock=0).count()
+    
+    # 6. Total Categories
+    categories_count = models.Category.objects.count()
+
+    # 7. Total Reviews
+    reviews_count = models.Review.objects.count()
+
     return Response({
         "sales": total_sales,
+        "revenue_stats": revenue_stats,
         "products": product_stats,
         "users": users_count,
-        "orders": order_stats
+        "orders": order_stats,
+        "out_of_stock": out_of_stock_count,
+        "categories": categories_count,
+        "reviews": reviews_count
     })
 
 
@@ -2078,3 +1806,15 @@ def manage_governorate_detail(request, pk):
             governorate.is_active = False
             governorate.save()
             return Response({"message": _("Governorate deactivated successfully.")}, status=status.HTTP_200_OK)
+
+from rest_framework.views import APIView
+from rest_framework.permissions import IsAdminUser
+from base.services import DashboardService
+
+class AdminDashboardAnalyticsView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        service = DashboardService()
+        data = service.get_dashboard_analytics()
+        return Response(data)

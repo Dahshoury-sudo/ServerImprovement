@@ -126,7 +126,7 @@ REST_FRAMEWORK = {
 
 SIMPLE_JWT = {
     # Token life span
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=5),  # Short life for security
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=500),  # Short life for security
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),  # Longer life for convenience
 
     # Other useful settings

@@ -187,7 +187,7 @@ class ProductVariant(models.Model):
 
     def save(self, *args, **kwargs):
         # Auto-reset the notification flag if stock is manually replenished above threshold
-        if self.stock > 5 and self.low_stock_notified:
+        if isinstance(self.stock, (int, float)) and self.stock > 5 and self.low_stock_notified:
             self.low_stock_notified = False
         super().save(*args, **kwargs)
 

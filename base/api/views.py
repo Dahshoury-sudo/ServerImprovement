@@ -1828,7 +1828,7 @@ class AdminDashboardAnalyticsView(APIView):
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def get_admin_notifications(request):
-    notifications = models.AdminNotification.objects.all()[:20]
+    notifications = models.AdminNotification.objects.all().order_by('is_read', '-created_at')[:20]
     data = []
     for n in notifications:
         data.append({

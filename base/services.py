@@ -178,7 +178,7 @@ class DashboardService:
         this_month_stats = self._get_summary_stats(this_month_start, today_end)
         last_month_stats = self._get_summary_stats(last_month_start, last_month_end)
 
-        return {
+        payload = {
             "summary": {
                 "today": today_stats,
                 "yesterday": yesterday_stats,
@@ -208,6 +208,20 @@ class DashboardService:
                 "monthly": self._get_monthly_chart(this_month_start)
             }
         }
+        
+        # Inject Google Analytics Data
+        try:
+            from base.analytics import GoogleAnalyticsService
+            ga_service = GoogleAnalyticsService()
+            payload["google_analytics"] = {
+                "active_users_30d": ga_service.get_active_users(days=30),
+                "most_viewed_pages_30d": ga_service.get_most_viewed_pages(days=30, limit=5)
+            }
+        except Exception as e:
+            print(f"Failed to fetch GA data: {e}")
+            payload["google_analytics"] = None
+            
+        return payload
 
 class StockService:
     LOW_STOCK_THRESHOLD = 5

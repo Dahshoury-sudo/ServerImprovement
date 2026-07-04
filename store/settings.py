@@ -158,6 +158,8 @@ CLOUDINARY_STORAGE = {
     'API_KEY': os.environ.get('CLOUDINARY_API_KEY'),
     'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET'),
 }
+GA4_PROPERTY_ID = os.environ.get('GA4_PROPERTY_ID')
+os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = os.path.join(BASE_DIR, 'google-credentials.json')
 
 
 # Add our custom X-Device-ID to the list of allowed headers

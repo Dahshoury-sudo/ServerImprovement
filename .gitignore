@@ -139,6 +139,7 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+google-credentials.json
 .venv
 env/
 venv/

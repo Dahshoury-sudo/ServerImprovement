@@ -1,5 +1,6 @@
 import os
 import json
+import base64
 from google.oauth2 import service_account
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import (
@@ -14,8 +15,9 @@ class GoogleAnalyticsService:
     def __init__(self):
         self.property_id = settings.GA4_PROPERTY_ID
         
-        creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-        if creds_json:
+        creds_b64 = os.environ.get('GOOGLE_CREDENTIALS_B64')
+        if creds_b64:
+            creds_json = base64.b64decode(creds_b64).decode('utf-8')
             creds_info = json.loads(creds_json)
             credentials = service_account.Credentials.from_service_account_info(creds_info)
             self.client = BetaAnalyticsDataClient(credentials=credentials)
